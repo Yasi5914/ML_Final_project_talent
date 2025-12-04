@@ -1,0 +1,52 @@
+import duckdb
+import numpy as np
+import pandas as pd
+
+DB_PATH = "/store/talent/db/talent.db"
+TABLE   = "fullTalentData"
+
+# Common missing codes in NCES-style surveys
+MISSING = [-9, -8, -7, -1, 0, 98, 99]
+
+con = duckdb.connect(DB_PATH)
+
+# 1) Get numeric columns from DuckDB
+numeric_cols = [r[0] for r in con.execute(f"""
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_name = '{TABLE}'
+      AND data_type IN ('INTEGER', 'BIGINT', 'DOUBLE', 'FLOAT', 'DECIMAL')
+""").fetchall()]
+
+print("Numeric columns:", len(numeric_cols))
+
+# 2) Load only numeric columns
+cols_sql = ", ".join(f'"{c}"' for c in numeric_cols)
+df = con.execute(f"SELECT {cols_sql} FROM {TABLE}").df()
+
+# 3) Replace missing-value codes & convert to float
+df = df.replace(MISSING, np.nan).astype("float64")
+
+# 4) Compute z-scores
+zdf = (df - df.mean()) / df.std(ddof=0)
+
+# 5) Rename columns with _z
+zdf = zdf.add_suffix("_z")
+
+# 6) Write back to DuckDB (adds new columns)
+con.execute(f"CREATE OR REPLACE TABLE {TABLE}_z AS SELECT * FROM {TABLE} LIMIT 0;")
+
+# Add original columns and z-score columns into a new table
+con.execute(f"""
+    CREATE OR REPLACE TABLE {TABLE}_z AS
+    SELECT *, {", ".join(f'"{c}_z"' for c in zdf.columns)}
+    FROM {TABLE}
+""")
+
+# Insert the z-score values
+# (DuckDB supports efficient appends from a Pandas df)
+con.execute(f"INSERT INTO {TABLE}_z ({', '.join(zdf.columns)}) SELECT * FROM zdf")    
+
+con.close()
+
+print("✔ Done: created table fullTalentData_z with z-score normalized features")
